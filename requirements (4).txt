@@ -1,0 +1,21 @@
+# Core
+streamlit>=1.32.0
+groq>=0.9.0
+
+# PDF report generation
+reportlab>=4.0.0
+
+# Resume PDF reading
+pypdf>=4.0.0
+
+# Text-to-Speech (read questions aloud)
+gTTS>=2.5.0
+
+# Speech-to-Text (voice input)
+SpeechRecognition>=3.10.0
+# pyaudio>=0.2.14   # uncomment if mic input needed (may need OS-level install)
+
+# Video / Webcam
+# st.camera_input is built into Streamlit — no extra install needed!
+# Body language AI uses Groq vision (meta-llama/llama-4-scout-17b-16e-instruct)
+# which is also handled by the groq package above.
