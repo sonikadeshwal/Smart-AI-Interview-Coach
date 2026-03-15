@@ -13,9 +13,21 @@ from pathlib import Path
 # ── Optional imports (graceful fallback) ─────────────────────────────────────
 try:
     import speech_recognition as sr
-    SPEECH_OK = True
+    SR_OK = True
 except ImportError:
-    SPEECH_OK = False
+    SR_OK = False
+
+# PyAudio is the common failure point — detect separately
+PYAUDIO_OK = False
+if SR_OK:
+    try:
+        import pyaudio as _pa  # noqa: F401
+        PYAUDIO_OK = True
+    except (ImportError, OSError):
+        PYAUDIO_OK = False
+
+# SPEECH_OK = SR installed (file-upload path works even without PyAudio)
+SPEECH_OK = SR_OK
 
 try:
     from gtts import gTTS
@@ -732,16 +744,74 @@ def text_to_speech_bytes(text: str) -> bytes | None:
         return None
 
 def record_and_transcribe() -> str:
-    if not SPEECH_OK:
-        return ""
+    """Live mic → text. Requires PyAudio. Returns transcript or error string."""
+    if not SR_OK:
+        return "[SpeechRecognition not installed]"
+    if not PYAUDIO_OK:
+        return "[PyAudio missing — use the audio file upload instead]"
     try:
         recognizer = sr.Recognizer()
         with sr.Microphone() as src:
             recognizer.adjust_for_ambient_noise(src, duration=0.5)
             audio = recognizer.listen(src, timeout=15, phrase_time_limit=120)
         return recognizer.recognize_google(audio)
+    except sr.WaitTimeoutError:
+        return "[No speech detected — try speaking sooner after clicking]"
+    except sr.UnknownValueError:
+        return "[Could not understand audio — please speak clearly and try again]"
+    except sr.RequestError as e:
+        return f"[Google Speech API error: {e}]"
     except Exception as e:
         return f"[Recognition error: {e}]"
+
+
+def transcribe_audio_file(audio_bytes: bytes, mime: str) -> str:
+    """Transcribe an uploaded audio file (wav/mp3/ogg/m4a) → text.
+    Works WITHOUT PyAudio — only needs SpeechRecognition."""
+    if not SR_OK:
+        return "[SpeechRecognition not installed — pip install SpeechRecognition]"
+    import wave, struct
+
+    recognizer = sr.Recognizer()
+    suffix = ".wav"
+    if "mp3" in mime:    suffix = ".mp3"
+    elif "ogg" in mime:  suffix = ".ogg"
+    elif "m4a" in mime or "mp4" in mime: suffix = ".m4a"
+    elif "webm" in mime: suffix = ".webm"
+    elif "flac" in mime: suffix = ".flac"
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(audio_bytes)
+            tmp_path = tmp.name
+
+        # Try ffmpeg conversion to wav for non-wav formats
+        wav_path = tmp_path
+        if suffix != ".wav":
+            wav_path = tmp_path.replace(suffix, "_converted.wav")
+            ret = os.system(f'ffmpeg -y -i "{tmp_path}" -ar 16000 -ac 1 "{wav_path}" -loglevel quiet 2>/dev/null')
+            if ret != 0 or not os.path.exists(wav_path):
+                # ffmpeg not available — try reading directly anyway
+                wav_path = tmp_path
+
+        with sr.AudioFile(wav_path) as src:
+            audio = recognizer.record(src)
+
+        result = recognizer.recognize_google(audio)
+        return result
+    except sr.UnknownValueError:
+        return "[Could not understand audio — ensure the recording is clear]"
+    except sr.RequestError as e:
+        return f"[Google Speech API error: {e}]"
+    except Exception as e:
+        return f"[Transcription error: {e}]"
+    finally:
+        try:
+            os.unlink(tmp_path)
+            if wav_path != tmp_path and os.path.exists(wav_path):
+                os.unlink(wav_path)
+        except Exception:
+            pass
 
 def extract_pdf_text(uploaded_file) -> str:
     if not PDF_READ_OK:
@@ -1049,7 +1119,7 @@ def page_setup():
             st.markdown('<div class="card">', unsafe_allow_html=True)
             st.markdown('<p class="slabel">🔑 Credentials & Role</p>', unsafe_allow_html=True)
 
-            name = st.text_input("Your Name (optional)", placeholder="e.g. Sonika Deshwal",
+            name = st.text_input("Your Name (optional)", placeholder="e.g. Aditya Singh",
                                  value=st.session_state.candidate_name)
             st.session_state.candidate_name = name
 
@@ -1086,8 +1156,8 @@ def page_setup():
             c1, c2, c3 = st.columns(3)
             with c1:
                 vm = st.toggle("Voice Input (Mic)", value=st.session_state.voice_mode,
-                               disabled=not SPEECH_OK,
-                               help="Requires: pip install SpeechRecognition pyaudio")
+                               disabled=not SR_OK,
+                               help="Requires: pip install SpeechRecognition  (PyAudio optional — file upload fallback available)")
                 st.session_state.voice_mode = vm
             with c2:
                 tts = st.toggle("Read Questions Aloud", value=st.session_state.tts_enabled,
@@ -1099,8 +1169,20 @@ def page_setup():
                                 help="Records webcam snapshots per question + AI body language analysis")
                 st.session_state.video_mode = vid
 
-            if not SPEECH_OK:
-                st.markdown('<p style="font-family:var(--mono);font-size:.68rem;color:#f59e0b">⚠ pip install SpeechRecognition pyaudio for voice input</p>', unsafe_allow_html=True)
+            # Status indicators
+            if not SR_OK:
+                st.markdown('<p style="font-family:var(--mono);font-size:.68rem;color:#f43f5e">✗ pip install SpeechRecognition  (voice input unavailable)</p>', unsafe_allow_html=True)
+            elif not PYAUDIO_OK:
+                st.markdown("""
+<div style="font-family:var(--mono);font-size:.68rem;color:#f59e0b;
+     background:rgba(245,158,11,.07);border:1px solid rgba(245,158,11,.2);
+     border-radius:8px;padding:.5rem .8rem;line-height:1.7">
+  ⚠ PyAudio not found — <strong>file upload fallback active</strong><br>
+  <span style="color:rgba(238,240,248,.4)">Record audio on any device → upload → auto-transcribe</span><br>
+  Fix: <code>pipwin install pyaudio</code> (Win) · <code>brew install portaudio &amp;&amp; pip install pyaudio</code> (Mac) · <code>sudo apt install python3-pyaudio</code> (Linux)
+</div>""", unsafe_allow_html=True)
+            else:
+                st.markdown('<p style="font-family:var(--mono);font-size:.68rem;color:#10b981">✓ Live mic ready (PyAudio detected)</p>', unsafe_allow_html=True)
             if not TTS_OK:
                 st.markdown('<p style="font-family:var(--mono);font-size:.68rem;color:#f59e0b">⚠ pip install gTTS for text-to-speech</p>', unsafe_allow_html=True)
 
@@ -1326,21 +1408,96 @@ background:{cat_c}11;text-align:center;white-space:nowrap">{q.get('category','Ge
     # ── Answer input ──────────────────────────────────────────────
     answer = ""
 
-    if st.session_state.voice_mode and SPEECH_OK:
-        col_mic, col_txt = st.columns([.12, .88])
-        with col_mic:
-            if st.button("🎤", key="mic_btn", help="Click to record (15 sec)"):
-                with st.spinner("Listening…"):
-                    result = record_and_transcribe()
-                    if result and not result.startswith("[Recognition error"):
-                        st.session_state[f"voice_ans_{idx}"] = result
-                    else:
-                        st.warning(result or "Could not transcribe. Try again.")
-        with col_txt:
+    if st.session_state.voice_mode and SR_OK:
+
+        if PYAUDIO_OK:
+            # ── LIVE MIC PATH (PyAudio present) ──────────────────
+            col_mic, col_txt = st.columns([.12, .88])
+            with col_mic:
+                if st.button("🎤", key="mic_btn", help="Click to record (up to 15 sec)"):
+                    with st.spinner("🎙 Listening… speak now"):
+                        result = record_and_transcribe()
+                        if result and not result.startswith("["):
+                            st.session_state[f"voice_ans_{idx}"] = result
+                            st.success("✓ Transcribed!")
+                        else:
+                            st.warning(result or "Could not transcribe. Try again.")
+            with col_txt:
+                default_voice = st.session_state.get(f"voice_ans_{idx}", "")
+                answer = st.text_area("Your Answer", value=default_voice, height=160,
+                                      placeholder="Speak (🎤) or type here…",
+                                      key=f"ans_{idx}", label_visibility="collapsed")
+
+        else:
+            # ── FILE UPLOAD FALLBACK (PyAudio missing) ────────────
+            st.markdown("""
+<div style="background:rgba(245,158,11,.07);border:1px solid rgba(245,158,11,.25);
+     border-radius:12px;padding:.9rem 1.1rem;margin-bottom:.8rem">
+  <div style="font-family:var(--mono);font-size:.68rem;color:#f59e0b;
+       letter-spacing:.1em;margin-bottom:.4rem">⚠ PYAUDIO NOT INSTALLED — FILE UPLOAD MODE</div>
+  <div style="font-size:.82rem;color:rgba(238,240,248,.7);line-height:1.6">
+    Record your answer on your phone or mic app, then upload the audio file below.<br>
+    <span style="font-family:var(--mono);font-size:.7rem;color:rgba(238,240,248,.4)">
+    Supported: WAV · MP3 · OGG · M4A · WebM · FLAC</span>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+            col_up, col_or = st.columns([.55, .45], gap="large")
+            with col_up:
+                st.markdown('<p class="slabel" style="font-size:.62rem">🎵 Upload Audio Answer</p>',
+                            unsafe_allow_html=True)
+                audio_file = st.file_uploader(
+                    "Upload audio",
+                    type=["wav","mp3","ogg","m4a","mp4","webm","flac"],
+                    key=f"audio_upload_{idx}",
+                    label_visibility="collapsed"
+                )
+                if audio_file is not None:
+                    st.audio(audio_file)
+                    if st.button("🔄  Transcribe Audio", key=f"transcribe_{idx}",
+                                 use_container_width=True):
+                        with st.spinner("Transcribing with Google Speech…"):
+                            result = transcribe_audio_file(
+                                audio_file.getvalue(), audio_file.type
+                            )
+                            if result and not result.startswith("["):
+                                st.session_state[f"voice_ans_{idx}"] = result
+                                st.success("✓ Transcribed successfully!")
+                            else:
+                                st.warning(result)
+
+            with col_or:
+                st.markdown("""
+<div style="font-family:var(--mono);font-size:.68rem;color:var(--muted);
+     line-height:1.9;padding-top:.4rem">
+  <strong style="color:var(--amber)">Quick Fix:</strong><br>
+  Windows → <code>pipwin install pyaudio</code><br>
+  macOS → <code>brew install portaudio</code><br>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<code>pip install pyaudio</code><br>
+  Linux → <code>sudo apt install python3-pyaudio</code>
+</div>""", unsafe_allow_html=True)
+
             default_voice = st.session_state.get(f"voice_ans_{idx}", "")
-            answer = st.text_area("Your Answer", value=default_voice, height=160,
-                                  placeholder="Speak (🎤) or type here…",
-                                  key=f"ans_{idx}", label_visibility="collapsed")
+            answer = st.text_area(
+                "Your Answer (transcribed or typed)",
+                value=default_voice, height=150,
+                placeholder="Transcription will appear here, or type your answer…",
+                key=f"ans_{idx}", label_visibility="collapsed"
+            )
+
+    elif st.session_state.voice_mode and not SR_OK:
+        # SpeechRecognition not installed at all
+        st.markdown("""
+<div style="background:rgba(244,63,94,.07);border:1px solid rgba(244,63,94,.2);
+     border-radius:12px;padding:.9rem 1.1rem;margin-bottom:.8rem">
+  <div style="font-family:var(--mono);font-size:.68rem;color:var(--rose);margin-bottom:.3rem">
+    ✗ SpeechRecognition not installed</div>
+  <code style="font-size:.75rem">pip install SpeechRecognition</code>
+  <span style="font-size:.8rem;color:var(--muted)"> — then restart the app</span>
+</div>""", unsafe_allow_html=True)
+        answer = st.text_area("Your Answer", height=180,
+                              placeholder="Type your answer here. Be thorough and specific.",
+                              key=f"ans_{idx}", label_visibility="collapsed")
     else:
         answer = st.text_area("Your Answer", height=180,
                               placeholder="Type your answer here. Be thorough and specific.",
