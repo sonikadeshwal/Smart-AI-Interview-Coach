@@ -200,6 +200,6 @@ This project is licensed under the **MIT License**.
 
 Made with ❤️ using Groq LLaMA 3.3 · Streamlit · Python
 
-⭐ **Star this repo if it helped your placement prep!**
+
 
 </div>
