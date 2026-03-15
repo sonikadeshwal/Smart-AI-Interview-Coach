@@ -813,7 +813,7 @@ def page_setup():
             st.markdown('<div class="card">', unsafe_allow_html=True)
             st.markdown('<p class="lbl">🔑 Credentials & Role</p>', unsafe_allow_html=True)
 
-            name = st.text_input("Your Name (optional)", placeholder="e.g. Aditya Kumar",
+            name = st.text_input("Your Name (optional)", placeholder="e.g. Sonika Deshwal",
                                  value=st.session_state.candidate_name)
             st.session_state.candidate_name = name
 
